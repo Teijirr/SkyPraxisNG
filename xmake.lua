@@ -34,6 +34,8 @@ includes("xmake-rules.lua")
 
 add_requires("simpleini")
 add_requires("safetyhook")
+add_requires("nlohmann_json")
+
 -- targets
 target(name)
     -- add dependencies to target
@@ -62,3 +64,4 @@ target(name)
     -- extra packages
     add_packages("simpleini")
     add_packages("safetyhook")
+    add_packages("nlohmann_json")
