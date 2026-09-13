@@ -1,24 +1,17 @@
-#include "PrismaUI_API.h"
-#include <nlohmann/json.hpp>
 #include <SimpleIni.h>
 #include <unordered_set>
 
-using JSON = nlohmann::json;
-
 // ====================== GLOBALS ======================
 
-PRISMA_UI_API::IVPrismaUI1* PrismaUI = nullptr;
-static PrismaView view;
+RE::BGSExplosion* g_explosion = nullptr;
 
 // ---- Settings ----
 
-std::uint32_t                    g_rollThreshold = 50;
-std::uint32_t                    g_openCardsScanCode1 = 0x2D;
-std::uint32_t                    g_openCardsScanCode2 = 0x1000;
-std::unordered_set<std::string>  g_excludedMods;
-std::unordered_set<std::string>  g_includedMods;
+std::uint32_t                                      g_rollThreshold = 25;
+std::unordered_set<std::string>                    g_excludedMods;
+std::unordered_set<std::string>                    g_includedMods;
 std::vector<std::pair<std::uint32_t, std::string>> g_includedSpellConfig;
-std::unordered_set<RE::SpellItem*> g_includedSpellForms;
+std::unordered_set<RE::SpellItem*>                 g_includedSpellForms;
 
 // ---- Spell Data ----
 
@@ -28,7 +21,6 @@ struct SpellData
     std::uint32_t  school;
     std::uint32_t  minSkill;
     std::string    sourceMod;
-    std::string    description;
     RE::SpellItem* form;
 };
 
@@ -39,28 +31,12 @@ std::vector<SpellData> g_spells;
 std::unordered_map<std::uint32_t, std::uint32_t> g_spellCastCountByTier;
 std::mutex g_spellCountMutex;
 
-// ---- Pending Card State ----
-
-std::uint32_t                 g_pendingTier = UINT32_MAX;
-std::vector<const SpellData*> g_pendingSpells;
-
-// ---- UI State ----
-
-bool g_isMenuOpen = false;
-
 // ====================== SERIALIZATION ======================
 
 constexpr std::uint32_t kPraxisSerializationType = 'PRAX';
 constexpr std::uint32_t kPraxisSerializationVersion = 1;
 
 // ====================== UTILITIES ======================
-
-std::string GetTranslation(const std::string& key)
-{
-    std::string result;
-    SKSE::Translation::Translate(key, result);
-    return result;
-}
 
 void PlaySound(const char* soundName)
 {
@@ -71,88 +47,6 @@ void PlaySound(const char* soundName)
     audioManager->GetSoundHandleByName(handle, soundName, 0);
     if (handle.IsValid())
         handle.Play();
-}
-
-bool IsVanillaMenuOpen()
-{
-    auto* ui = RE::UI::GetSingleton();
-    if (!ui) return true;
-
-    return ui->GameIsPaused()
-        || ui->IsMenuOpen(RE::MainMenu::MENU_NAME)
-        || ui->IsMenuOpen(RE::Console::MENU_NAME)
-        || ui->IsMenuOpen(RE::InventoryMenu::MENU_NAME)
-        || ui->IsMenuOpen(RE::MagicMenu::MENU_NAME)
-        || ui->IsMenuOpen(RE::MapMenu::MENU_NAME)
-        || ui->IsMenuOpen(RE::JournalMenu::MENU_NAME)
-        || ui->IsMenuOpen(RE::ContainerMenu::MENU_NAME)
-        || ui->IsMenuOpen(RE::DialogueMenu::MENU_NAME);
-}
-
-// ====================== UI ======================
-
-void HideCards()
-{
-    if (PrismaUI->IsValid(view))
-        PrismaUI->Hide(view);
-    g_isMenuOpen = false;
-}
-
-JSON BuildSpellsArray(const std::vector<const SpellData*>& spells)
-{
-    JSON arr = JSON::array();
-    for (const auto* spell : spells) {
-        arr.push_back({
-            {"name",        spell->name},
-            {"school",      spell->school},
-            {"minSkill",    spell->minSkill},
-            {"sourceMod",   spell->sourceMod},
-            {"description", spell->description}
-            });
-    }
-    return arr;
-}
-
-void ShowCards(const std::vector<const SpellData*>& spells)
-{
-    PrismaUI->Show(view);
-    PrismaUI->Focus(view, true);
-
-    std::string script = "updateCards(" + BuildSpellsArray(spells).dump() + ")";
-    PrismaUI->Invoke(view, script.c_str());
-
-    g_isMenuOpen = true;
-}
-
-JSON BuildTranslationsJSON()
-{
-    return {
-        {"title", GetTranslation("$PraxisTitle")},
-        {"school_info", {
-            {"18", {{"name", GetTranslation("$PraxisAlteration")},  {"icon", "alteration.png"}}},
-            {"19", {{"name", GetTranslation("$PraxisConjuration")}, {"icon", "conjuration.png"}}},
-            {"20", {{"name", GetTranslation("$PraxisDestruction")}, {"icon", "destruction.png"}}},
-            {"21", {{"name", GetTranslation("$PraxisIllusion")},    {"icon", "illusion.png"}}},
-            {"22", {{"name", GetTranslation("$PraxisRestoration")}, {"icon", "restoration.png"}}}
-        }},
-        {"tier_names", {
-            {"0",   GetTranslation("$PraxisNovice")},
-            {"25",  GetTranslation("$PraxisApprentice")},
-            {"50",  GetTranslation("$PraxisAdept")},
-            {"75",  GetTranslation("$PraxisExpert")},
-            {"100", GetTranslation("$PraxisMaster")}
-        }}
-    };
-}
-
-void OnViewReady(PrismaView view)
-{
-    SKSE::log::info("View DOM is ready {}", view);
-
-    std::string script = "updateTranslations(" + BuildTranslationsJSON().dump() + ")";
-    PrismaUI->Invoke(view, script.c_str());
-
-    PrismaUI->Hide(view);
 }
 
 // ====================== SPELL SCANNING ======================
@@ -170,24 +64,6 @@ std::unordered_set<RE::SpellItem*> CollectLearnableSpells(RE::TESDataHandler* da
     return learnableSpells;
 }
 
-std::string BuildSpellDescription(RE::SpellItem* spell)
-{
-    RE::BSString buf;
-    spell->GetDescription(buf, spell);
-    if (buf.c_str() && buf.size() > 0)
-        return buf.c_str();
-
-    std::string description;
-    for (auto* effect : spell->effects) {
-        if (!effect || !effect->baseEffect) continue;
-        std::string effectName = effect->baseEffect->GetName();
-        if (effectName.empty()) continue;
-        if (!description.empty()) description += ", ";
-        description += effectName;
-    }
-    return description;
-}
-
 void ScanAndRegisterSpells(RE::TESDataHandler* dataHandler,
     const std::unordered_set<RE::SpellItem*>& learnableSpells)
 {
@@ -203,8 +79,7 @@ void ScanAndRegisterSpells(RE::TESDataHandler* dataHandler,
             sourceMod = file->fileName;
 
         bool forceInclude = false;
-        if (sourceMod && g_includedMods.size() > 0 && g_includedMods.count(std::string(sourceMod)))
-        {
+        if (sourceMod && !g_includedMods.empty() && g_includedMods.count(std::string(sourceMod))) {
             forceInclude = true;
         }
 
@@ -222,23 +97,19 @@ void ScanAndRegisterSpells(RE::TESDataHandler* dataHandler,
         if (!learnableSpells.count(spell) && !forceInclude) continue;
 
         auto school = static_cast<std::uint32_t>(spell->GetAssociatedSkill());
-        if (!std::count(validSchools.begin(), validSchools.end(), school))
-        {
+        if (!std::count(validSchools.begin(), validSchools.end(), school)) {
             if (!forceInclude)
                 continue;
             else
                 school = 20; // Default to Destruction for forced includes
         }
 
-        // Default to 0 if unknown minimum skill, which will be treated as Novice (0) tier
         std::uint32_t minSkill = 0;
         auto* effect = spell->GetCostliestEffectItem();
         if (effect && effect->baseEffect)
             minSkill = static_cast<std::uint32_t>(effect->baseEffect->data.minimumSkill);
 
-        // MinSkill should be one of the defined tiers (0, 25, 50, 75, 100). If not, default to 0.
-        if (minSkill != 0 && minSkill != 25 && minSkill != 50 && minSkill != 75 && minSkill != 100)
-        {
+        if (minSkill != 0 && minSkill != 25 && minSkill != 50 && minSkill != 75 && minSkill != 100) {
             minSkill = 0;
         }
 
@@ -248,47 +119,95 @@ void ScanAndRegisterSpells(RE::TESDataHandler* dataHandler,
         if (!seen.insert({ name, school }).second) continue;
         if (sourceMod && g_excludedMods.count(std::string(sourceMod))) continue;
 
-        std::string description = BuildSpellDescription(spell);
-
         SKSE::log::info("  [{}] '{}' | school={} | minSkill={} | mod={}", count, name, school, minSkill, sourceMod);
-        g_spells.push_back({ name, school, minSkill, sourceMod, description, spell });
+        g_spells.push_back({ name, school, minSkill, sourceMod, spell });
         ++count;
     }
 
     SKSE::log::info("Scan complete. {} spells found.", count);
 }
 
-// ====================== SPELL ROLL ======================
+// ====================== SPELL SELECTION & LEARNING ======================
 
-void FillPendingSpells(std::unordered_map<std::uint32_t,
-    std::vector<const SpellData*>>&unlearnedBySchool,
+std::vector<const SpellData*> SelectCandidateSpells(
+    std::unordered_map<std::uint32_t, std::vector<const SpellData*>>& unlearnedBySchool,
     std::mt19937& rng)
 {
+    std::vector<const SpellData*> candidates;
     constexpr std::array<std::uint32_t, 5> schoolOrder = { 20, 18, 22, 19, 21 };
 
+    // Pick 1 candidate from each available school
     for (auto schoolId : schoolOrder) {
         auto& pool = unlearnedBySchool[schoolId];
         if (pool.empty()) continue;
 
         std::uniform_int_distribution<std::size_t> dist(0, pool.size() - 1);
         std::size_t idx = dist(rng);
-        g_pendingSpells.push_back(pool[idx]);
+        candidates.push_back(pool[idx]);
         pool.erase(pool.begin() + idx);
     }
 
-    if (g_pendingSpells.size() < 5) {
+    // Fill remaining slots up to 5 candidates if necessary
+    if (candidates.size() < 5) {
         std::vector<const SpellData*> backup;
         for (auto schoolId : schoolOrder) {
             auto& pool = unlearnedBySchool[schoolId];
             backup.insert(backup.end(), pool.begin(), pool.end());
         }
 
-        while (g_pendingSpells.size() < 5 && !backup.empty()) {
+        while (candidates.size() < 5 && !backup.empty()) {
             std::uniform_int_distribution<std::size_t> dist(0, backup.size() - 1);
             std::size_t idx = dist(rng);
-            g_pendingSpells.push_back(backup[idx]);
+            candidates.push_back(backup[idx]);
             backup.erase(backup.begin() + idx);
         }
+    }
+
+    return candidates;
+}
+
+void PlayExplosionOnPlayer()
+{
+    if (!g_explosion) return;
+
+    auto* player = RE::PlayerCharacter::GetSingleton();
+    if (!player) return;
+
+    auto* cell = player->GetParentCell();
+    auto* worldspace = player->GetWorldspace();
+    auto* dataHandler = RE::TESDataHandler::GetSingleton();
+    if (!dataHandler || !cell) return;
+
+    RE::ObjectRefHandle handle = dataHandler->CreateReferenceAtLocation(
+        g_explosion,
+        player->GetPosition(),
+        RE::NiPoint3{ 0.0f, 0.0f, 0.0f },
+        cell,
+        worldspace,
+        nullptr,
+        nullptr,
+        RE::ObjectRefHandle{},
+        false,
+        true);
+
+    RE::NiPointer<RE::TESObjectREFR> explosionRefPtr = handle.get();
+    if (explosionRefPtr)
+    {
+        explosionRefPtr->SetActivationBlocked(true);
+    }
+}
+
+void DebugNotification(const char* a_notification, const char* a_soundToPlay = nullptr, bool a_cancelIfAlreadyQueued = true)
+{
+    try
+    {
+        using func_t = decltype(&DebugNotification);
+        static REL::Relocation<func_t> func{ RELOCATION_ID(52050, 52933) };
+        return func(a_notification, a_soundToPlay, a_cancelIfAlreadyQueued);
+    }
+    catch (const std::exception& e)
+    {
+		SKSE::log::error("Failed to call DebugNotification. This may be due to an unsupported Skyrim version.");
     }
 }
 
@@ -309,8 +228,24 @@ bool TryRollTier(std::uint32_t tier, RE::PlayerCharacter* player, std::mt19937& 
         return false;
     }
 
-    g_pendingTier = tier;
-    FillPendingSpells(unlearnedBySchool, rng);
+    auto candidates = SelectCandidateSpells(unlearnedBySchool, rng);
+    if (!candidates.empty()) {
+        std::uniform_int_distribution<std::size_t> dist(0, candidates.size() - 1);
+        const auto* chosenSpell = candidates[dist(rng)];
+
+        if (chosenSpell && chosenSpell->form) {
+            player->AddSpell(chosenSpell->form);
+            PlaySound("UISkillIncreaseSD");
+
+			const char* spellName = (chosenSpell->name + " !").c_str();
+
+            DebugNotification(spellName);
+            SKSE::log::info("Learned spell: {}", spellName);
+
+            PlayExplosionOnPlayer();
+        }
+    }
+
     return true;
 }
 
@@ -319,113 +254,16 @@ void OnSpellCastThresholdReached(std::uint32_t minSkill, RE::PlayerCharacter* pl
     constexpr std::array<std::uint32_t, 5> tierOrder = { 0, 25, 50, 75, 100 };
     static std::mt19937 rng(std::random_device{}());
 
-    g_pendingSpells.clear();
-
     auto tierIt = std::find(tierOrder.begin(), tierOrder.end(), minSkill);
     if (tierIt == tierOrder.end())
         tierIt = tierOrder.begin();
 
-    bool foundValidRoll = false;
     for (; tierIt != tierOrder.end(); ++tierIt) {
         if (TryRollTier(*tierIt, player, rng)) {
-            foundValidRoll = true;
             break;
         }
     }
-
-    if (foundValidRoll) {
-        //RE::DebugNotification(GetTranslation("$PraxisPressChosenKey").c_str());
-    }
-    else {
-        g_pendingTier = UINT32_MAX;
-        SKSE::log::info("Player has learned every available spell.");
-    }
 }
-
-// ====================== CARD SELECTION ======================
-
-void OnCardChosen(const char* spellName)
-{
-    if (!spellName) return;
-
-    std::string targetName(spellName);
-    auto it = std::find_if(g_spells.begin(), g_spells.end(), [&](const SpellData& s) {
-        return s.name == targetName;
-        });
-
-    if (it == g_spells.end()) {
-        SKSE::log::warn("Spell not found in g_spells: {}", targetName);
-        return;
-    }
-
-    auto* player = RE::PlayerCharacter::GetSingleton();
-    if (player && it->form) {
-        player->AddSpell(it->form);
-        PlaySound("UISkillIncreaseSD");
-        HideCards();
-        //RE::DebugNotification(GetTranslation("$PraxisSpellLearned").c_str());
-        g_pendingSpells.clear();
-    }
-}
-
-// ====================== INPUT HANDLER ======================
-
-class InputEventHandler : public RE::BSTEventSink<RE::InputEvent*>
-{
-public:
-    static InputEventHandler* GetSingleton()
-    {
-        static InputEventHandler instance;
-        return &instance;
-    }
-
-    RE::BSEventNotifyControl ProcessEvent(
-        RE::InputEvent* const* a_event,
-        RE::BSTEventSource<RE::InputEvent*>*) override
-    {
-        if (!a_event)
-            return RE::BSEventNotifyControl::kContinue;
-
-        for (auto* event = *a_event; event; event = event->next) {
-            auto* buttonEvent = event->AsButtonEvent();
-            if (!buttonEvent || !buttonEvent->IsDown()) continue;
-
-            std::uint32_t idCode = buttonEvent->GetIDCode();
-            RE::INPUT_DEVICE device = buttonEvent->GetDevice();
-
-            if (HandlePendingSpellInput(idCode)) break;
-            HandleGamepadMenuInput(device, idCode);
-        }
-
-        return RE::BSEventNotifyControl::kContinue;
-    }
-
-private:
-    InputEventHandler() = default;
-
-    bool HandlePendingSpellInput(std::uint32_t idCode)
-    {
-        if (g_pendingTier == UINT32_MAX) return false;
-        if (IsVanillaMenuOpen()) return false;
-
-        if (idCode == g_openCardsScanCode1 || idCode == g_openCardsScanCode2) {
-            ShowCards(g_pendingSpells);
-            PlaySound("UILevelUpSD");
-            g_pendingTier = UINT32_MAX;
-            return true;
-        }
-        return false;
-    }
-
-    void HandleGamepadMenuInput(RE::INPUT_DEVICE device, std::uint32_t idCode)
-    {
-        if (device != RE::INPUT_DEVICE::kGamepad || !g_isMenuOpen) return;
-
-        if (idCode == 0x0004) PrismaUI->Invoke(view, "navigateCards(-1)");
-        else if (idCode == 0x0008) PrismaUI->Invoke(view, "navigateCards(1)");
-        else if (idCode == 0x1000) PrismaUI->Invoke(view, "selectFocusedCard()");
-    }
-};
 
 // ====================== SPELL CAST HANDLER ======================
 
@@ -453,14 +291,15 @@ public:
         if (!spell) return RE::BSEventNotifyControl::kContinue;
 
         if (!IsValidMagicSchool(spell)) return RE::BSEventNotifyControl::kContinue;
-        if (g_pendingTier != UINT32_MAX) return RE::BSEventNotifyControl::kContinue;
 
         std::uint32_t minSkill = GetMinSkill(spell);
         std::lock_guard lock(g_spellCountMutex);
         auto& count = g_spellCastCountByTier[minSkill];
         if (++count >= g_rollThreshold) {
             count = 0;
-            OnSpellCastThresholdReached(minSkill, player);
+            SKSE::GetTaskInterface()->AddTask([minSkill, player]() {
+                OnSpellCastThresholdReached(minSkill, player);
+            });
         }
 
         if (spell->GetCastingType() == RE::MagicSystem::CastingType::kConcentration) {
@@ -468,14 +307,13 @@ public:
                 while (true) {
                     std::this_thread::sleep_for(std::chrono::seconds(1));
 
-                    // Check if still casting on either hand
                     auto* casterL = player->GetMagicCaster(RE::MagicSystem::CastingSource::kLeftHand);
                     auto* casterR = player->GetMagicCaster(RE::MagicSystem::CastingSource::kRightHand);
                     bool stillCasting =
                         (casterL && casterL->currentSpell == spell && casterL->state == RE::MagicCaster::State::kCasting) ||
                         (casterR && casterR->currentSpell == spell && casterR->state == RE::MagicCaster::State::kCasting);
 
-                    if (!stillCasting || g_pendingTier != UINT32_MAX) break;
+                    if (!stillCasting) break;
 
                     std::lock_guard lock(g_spellCountMutex);
                     auto& count = g_spellCastCountByTier[minSkill];
@@ -483,7 +321,7 @@ public:
                         count = 0;
                         SKSE::GetTaskInterface()->AddTask([minSkill, player]() {
                             OnSpellCastThresholdReached(minSkill, player);
-                            });
+                        });
                         break;
                     }
                 }
@@ -535,8 +373,6 @@ void PraxisSaveCallback(SKSE::SerializationInterface* a_intfc)
 void PraxisLoadCallback(SKSE::SerializationInterface* a_intfc)
 {
     g_spellCastCountByTier.clear();
-    g_pendingSpells.clear();
-    g_pendingTier = UINT32_MAX;
 
     std::uint32_t type, version, length;
     while (a_intfc->GetNextRecordInfo(type, version, length)) {
@@ -565,42 +401,23 @@ void PraxisLoadCallback(SKSE::SerializationInterface* a_intfc)
 void PraxisRevertCallback(SKSE::SerializationInterface*)
 {
     g_spellCastCountByTier.clear();
-    g_pendingSpells.clear();
-    g_pendingTier = UINT32_MAX;
-    HideCards();
 }
 
 // ====================== INIT ======================
 
 void OnDataLoaded()
 {
-    SKSE::Translation::ParseTranslation("Praxis");
-
     auto* dataHandler = RE::TESDataHandler::GetSingleton();
     if (!dataHandler) {
         SKSE::log::error("TESDataHandler not available!");
         return;
     }
 
-    PrismaUI = static_cast<PRISMA_UI_API::IVPrismaUI1*>(
-        PRISMA_UI_API::RequestPluginAPI(PRISMA_UI_API::InterfaceVersion::V1));
-
-    if (!PrismaUI) {
-        SKSE::log::error("Failed to initialize PrismaUI API");
-        return;
-    }
-
-    SKSE::log::info("PrismaUI API initialized successfully");
-
-    view = PrismaUI->CreateView("Praxis/index.html", OnViewReady);
+    g_explosion = RE::TESForm::LookupByEditorID<RE::BGSExplosion>("ExplosionIllusionLight01");
 
     for (const auto& [localId, modName] : g_includedSpellConfig) {
-        RE::SpellItem* resolvedSpell = nullptr;
+        RE::SpellItem* resolvedSpell = dataHandler->LookupForm<RE::SpellItem>(localId, modName);
 
-        // Try as a plain spell first
-        resolvedSpell = dataHandler->LookupForm<RE::SpellItem>(localId, modName);
-
-        // If that fails, try as a Shout and pull its spell(s) out
         if (!resolvedSpell) {
             if (auto* shout = dataHandler->LookupForm<RE::TESShout>(localId, modName)) {
                 for (const auto& variation : shout->variations) {
@@ -608,7 +425,7 @@ void OnDataLoaded()
                         g_includedSpellForms.insert(variation.spell);
                     }
                 }
-                continue; // handled via shout, skip the single-spell insert below
+                continue;
             }
         }
 
@@ -623,9 +440,6 @@ void OnDataLoaded()
     auto learnableSpells = CollectLearnableSpells(dataHandler);
     ScanAndRegisterSpells(dataHandler, learnableSpells);
 
-    PrismaUI->RegisterJSListener(view, "choseCard", OnCardChosen);
-
-    RE::BSInputDeviceManager::GetSingleton()->AddEventSink(InputEventHandler::GetSingleton());
     RE::ScriptEventSourceHolder::GetSingleton()->AddEventSink(SpellCastEventHandler::GetSingleton());
 }
 
@@ -645,8 +459,6 @@ void LoadSettings()
     ini.LoadFile(path.c_str());
 
     g_rollThreshold = static_cast<std::uint32_t>(ini.GetDoubleValue("General", "iRollThreshold", 50));
-    g_openCardsScanCode1 = static_cast<std::uint32_t>(ini.GetDoubleValue("General", "iOpenCardsScanCode1", 0x2D));
-    g_openCardsScanCode2 = static_cast<std::uint32_t>(ini.GetDoubleValue("General", "iOpenCardsScanCode2", 0x1000));
 
     const std::string excludedModsStr = ini.GetValue("General", "sExcludeMods", "");
     if (!excludedModsStr.empty()) {
