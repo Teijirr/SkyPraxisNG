@@ -1,5 +1,5 @@
 -- info to change
-local name = "commonlibsse-ng-template"
+local name = "SkyPraxisNG"
 local author = "ziman99"
 local description = "SKSE64 plugin template using CommonLibSSE-NG"
 local version = "0.0.0"
