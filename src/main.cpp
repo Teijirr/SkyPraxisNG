@@ -211,8 +211,11 @@ void DebugNotification(const char* a_notification, const char* a_soundToPlay = n
     }
 }
 
-bool TryRollTier(std::uint32_t tier, RE::PlayerCharacter* player, std::mt19937& rng)
+bool TryRollTier(std::uint32_t tier, std::uint32_t school, RE::PlayerCharacter* player, std::mt19937& rng)
 {
+    constexpr std::array<std::uint32_t, 5> validSchools = { 18, 19, 20, 21, 22 };
+    bool schoolIsValid = std::count(validSchools.begin(), validSchools.end(), school) > 0;
+
     std::unordered_map<std::uint32_t, std::vector<const SpellData*>> unlearnedBySchool;
     std::size_t totalUnlearned = 0;
 
@@ -223,33 +226,48 @@ bool TryRollTier(std::uint32_t tier, RE::PlayerCharacter* player, std::mt19937& 
         totalUnlearned++;
     }
 
-    if (totalUnlearned == 0) {
-        SKSE::log::info("Tier {} fully learned. Escalating...", tier);
-        return false;
+    const SpellData* chosenSpell = nullptr;
+
+    if (schoolIsValid) {
+        // Strict same-school
+        auto& preferredPool = unlearnedBySchool[school];
+        if (preferredPool.empty()) {
+            SKSE::log::info("School {} tier {} fully learned. Escalating within school...", school, tier);
+            return false; // let OnSpellCastThresholdReached move to the next tier, same school
+        }
+
+        std::uniform_int_distribution<std::size_t> dist(0, preferredPool.size() - 1);
+        chosenSpell = preferredPool[dist(rng)];
+    }
+    else {
+        // Unknown/invalid school: fall back to original cross-school random behavior.
+        if (totalUnlearned == 0) {
+            SKSE::log::info("Tier {} fully learned. Escalating...", tier);
+            return false;
+        }
+
+        auto candidates = SelectCandidateSpells(unlearnedBySchool, rng);
+        if (!candidates.empty()) {
+            std::uniform_int_distribution<std::size_t> dist(0, candidates.size() - 1);
+            chosenSpell = candidates[dist(rng)];
+        }
     }
 
-    auto candidates = SelectCandidateSpells(unlearnedBySchool, rng);
-    if (!candidates.empty()) {
-        std::uniform_int_distribution<std::size_t> dist(0, candidates.size() - 1);
-        const auto* chosenSpell = candidates[dist(rng)];
+    if (chosenSpell && chosenSpell->form) {
+        player->AddSpell(chosenSpell->form);
+        PlaySound("UISkillIncreaseSD");
 
-        if (chosenSpell && chosenSpell->form) {
-            player->AddSpell(chosenSpell->form);
-            PlaySound("UISkillIncreaseSD");
+        std::string spellName = chosenSpell->name + " !";
+        DebugNotification(spellName.c_str());
+        SKSE::log::info("Learned spell: {}", spellName);
 
-			const char* spellName = (chosenSpell->name + " !").c_str();
-
-            DebugNotification(spellName);
-            SKSE::log::info("Learned spell: {}", spellName);
-
-            PlayExplosionOnPlayer();
-        }
+        PlayExplosionOnPlayer();
     }
 
     return true;
 }
 
-void OnSpellCastThresholdReached(std::uint32_t minSkill, RE::PlayerCharacter* player)
+void OnSpellCastThresholdReached(std::uint32_t minSkill, std::uint32_t school, RE::PlayerCharacter* player)
 {
     constexpr std::array<std::uint32_t, 5> tierOrder = { 0, 25, 50, 75, 100 };
     static std::mt19937 rng(std::random_device{}());
@@ -259,7 +277,7 @@ void OnSpellCastThresholdReached(std::uint32_t minSkill, RE::PlayerCharacter* pl
         tierIt = tierOrder.begin();
 
     for (; tierIt != tierOrder.end(); ++tierIt) {
-        if (TryRollTier(*tierIt, player, rng)) {
+        if (TryRollTier(*tierIt, school, player, rng)) {
             break;
         }
     }
@@ -293,17 +311,18 @@ public:
         if (!IsValidMagicSchool(spell)) return RE::BSEventNotifyControl::kContinue;
 
         std::uint32_t minSkill = GetMinSkill(spell);
+        std::uint32_t school = GetSchool(spell);
         std::lock_guard lock(g_spellCountMutex);
         auto& count = g_spellCastCountByTier[minSkill];
         if (++count >= g_rollThreshold) {
             count = 0;
-            SKSE::GetTaskInterface()->AddTask([minSkill, player]() {
-                OnSpellCastThresholdReached(minSkill, player);
+            SKSE::GetTaskInterface()->AddTask([minSkill, school, player]() {
+                OnSpellCastThresholdReached(minSkill, school, player);
             });
         }
 
         if (spell->GetCastingType() == RE::MagicSystem::CastingType::kConcentration) {
-            std::thread([spell, minSkill, player]() {
+            std::thread([spell, minSkill, school, player]() {
                 while (true) {
                     std::this_thread::sleep_for(std::chrono::seconds(1));
 
@@ -319,8 +338,8 @@ public:
                     auto& count = g_spellCastCountByTier[minSkill];
                     if (++count >= g_rollThreshold) {
                         count = 0;
-                        SKSE::GetTaskInterface()->AddTask([minSkill, player]() {
-                            OnSpellCastThresholdReached(minSkill, player);
+                        SKSE::GetTaskInterface()->AddTask([minSkill, school, player]() {
+                            OnSpellCastThresholdReached(minSkill, school, player);
                         });
                         break;
                     }
@@ -346,6 +365,11 @@ private:
         if (auto* effect = spell->GetCostliestEffectItem(); effect && effect->baseEffect)
             return static_cast<std::uint32_t>(effect->baseEffect->data.minimumSkill);
         return 0;
+    }
+
+    static std::uint32_t GetSchool(RE::SpellItem* spell)
+    {
+        return static_cast<std::uint32_t>(spell->GetAssociatedSkill());
     }
 };
 
